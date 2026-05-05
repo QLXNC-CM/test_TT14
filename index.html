@@ -20,6 +20,11 @@
     .card .hd{padding:14px 16px;border-bottom:1px solid var(--line);background:#fbfdff;font-weight:700;display:flex;align-items:center;justify-content:space-between;gap:10px}
     .card .bd{padding:14px 16px}
     .searchbox{display:grid;gap:12px}
+    .livebar{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;margin-top:-4px}
+    .live-dot{width:8px;height:8px;border-radius:999px;background:#14b8a6;box-shadow:0 0 0 4px rgba(20,184,166,.12);flex:0 0 auto}
+    .livebar.searching .live-dot{animation:pulse 1s infinite;background:#f59e0b;box-shadow:0 0 0 4px rgba(245,158,11,.12)}
+    .livebar.empty .live-dot{background:#94a3b8;box-shadow:0 0 0 4px rgba(148,163,184,.12)}
+    @keyframes pulse{0%{transform:scale(1);opacity:.75}50%{transform:scale(1.35);opacity:1}100%{transform:scale(1);opacity:.75}}
     input[type="search"],select{width:100%;border:1px solid #cbd5e1;border-radius:14px;padding:12px 13px;background:#fff;color:var(--text);font:inherit;outline:none}
     input[type="search"]:focus, select:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(15,118,110,.16)}
     .mode{display:grid;grid-template-columns:1fr;gap:8px}
@@ -76,13 +81,14 @@
       <div class="hd"><span>Tìm kiếm</span><span class="small"><span class="kbd">Ctrl</span> + <span class="kbd">K</span></span></div>
       <div class="bd searchbox">
         <input id="q" type="search" autocomplete="off" placeholder="Ví dụ: khu vuc han che, hanh ly xach tay, kiểm soát chất lượng..." />
+        <div class="livebar" id="liveBar"><span class="live-dot" aria-hidden="true"></span><span id="liveStatus">Tìm live đang bật: gõ là có kết quả, không cần bấm Tìm.</span></div>
         <div class="mode" role="radiogroup" aria-label="Chế độ tìm kiếm">
           <label><input type="radio" name="mode" value="similar" checked><span><b>Tìm tương tự / không dấu</b><small>Gõ không dấu vẫn ra kết quả: “khu vuc han che” → “khu vực hạn chế”.</small></span></label>
           <label><input type="radio" name="mode" value="exact"><span><b>Tìm chính xác nội dung / có dấu</b><small>Khớp đúng cụm từ tiếng Việt bạn nhập, phù hợp khi tra thuật ngữ pháp lý chính xác.</small></span></label>
         </div>
         <select id="sourceFilter" aria-label="Lọc nguồn dữ liệu"></select>
         <div class="row">
-          <button class="primary" id="btnSearch">Tìm</button>
+          <button class="primary" id="btnSearch">Tìm ngay</button>
           <button id="btnClear">Xóa</button>
           <button id="btnExport">Xuất kết quả</button>
         </div>
@@ -127,7 +133,10 @@
   let currentId = null;
   let lastResults = [];
   const bookmarks = new Set(JSON.parse(localStorage.getItem('tt14_bookmarks') || '[]'));
-  const history = JSON.parse(localStorage.getItem('tt14_history') || '[]');
+  let history = JSON.parse(localStorage.getItem('tt14_history') || '[]');
+  let liveTimer = null;
+  let historyTimer = null;
+  let searchSeq = 0;
 
   function normalizeVi(str){
     return (str || '')
@@ -142,6 +151,13 @@
   function esc(s){ return (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
   function truncate(s,n=300){ s=(s||'').trim(); return s.length>n ? s.slice(0,n).replace(/\s+\S*$/,'') + '…' : s; }
   function tokens(q){ return [...new Set(normalizeVi(q).split(' ').filter(x => x.length > 1))]; }
+  function setLiveStatus(message, state='ready'){
+    const bar = $('liveBar');
+    if (!bar) return;
+    bar.classList.remove('searching','empty');
+    if (state) bar.classList.add(state);
+    $('liveStatus').textContent = message;
+  }
   DATA.forEach((d,i)=>{ d._idx=i; d._hay = `${d.title} ${d.source} ${d.chapter||''} ${d.text}`; d._norm = normalizeVi(d._hay); d._normTitle=normalizeVi(d.title+' '+d.source); d._lower=lowerVi(d._hay); });
 
   function fillFilters(){
@@ -167,18 +183,23 @@
   function renderChips(){
     const samples = ['khu vuc han che','hanh ly xach tay','kiểm soát chất lượng','hanh vi can thiep bat hop phap','the giay phep','soi chieu an ninh','vu khi cong cu ho tro','niem phong an ninh'];
     $('chips').innerHTML = samples.map(s => `<button class="chip" data-q="${esc(s)}">${esc(s)}</button>`).join('');
-    $('chips').querySelectorAll('[data-q]').forEach(btn => btn.addEventListener('click', () => { $('q').value = btn.dataset.q; runSearch(); }));
+    $('chips').querySelectorAll('[data-q]').forEach(btn => btn.addEventListener('click', () => { $('q').value = btn.dataset.q; runSearch('chip'); $('q').focus(); }));
   }
 
   function renderHistory(){
     if (!history.length) { $('historyBox').innerHTML = ''; return; }
     $('historyBox').innerHTML = `<div class="small" style="margin:8px 0 6px">Tìm gần đây</div><div class="chips">${history.slice(0,6).map(h => `<button class="chip" data-q="${esc(h)}">${esc(h)}</button>`).join('')}</div>`;
-    $('historyBox').querySelectorAll('[data-q]').forEach(btn => btn.addEventListener('click', () => { $('q').value = btn.dataset.q; runSearch(); }));
+    $('historyBox').querySelectorAll('[data-q]').forEach(btn => btn.addEventListener('click', () => { $('q').value = btn.dataset.q; runSearch('history'); $('q').focus(); }));
   }
   function saveHistory(q){
     q = q.trim(); if (!q) return;
-    const next = [q, ...history.filter(x => x !== q)].slice(0,10);
-    localStorage.setItem('tt14_history', JSON.stringify(next));
+    history = [q, ...history.filter(x => x !== q)].slice(0,10);
+    localStorage.setItem('tt14_history', JSON.stringify(history));
+  }
+  function saveHistorySoon(q){
+    clearTimeout(historyTimer);
+    if (!q.trim()) return;
+    historyTimer = setTimeout(() => { saveHistory(q); renderHistory(); }, 900);
   }
 
   function scoreSimilar(d, q){
@@ -268,13 +289,34 @@
     }).join('');
     $('results').querySelectorAll('[data-open]').forEach(el => el.addEventListener('click', () => openRecord(el.dataset.open, q, mode)));
   }
-  function runSearch(){
+  function runSearch(reason='manual'){
     const q = $('q').value.trim();
     const mode = document.querySelector('input[name="mode"]:checked').value;
     const sourceId = $('sourceFilter').value;
     const results = searchRecords(q, mode, sourceId);
     renderResults(results, q, mode);
-    if (q) saveHistory(q);
+    if (!q){
+      setLiveStatus('Tìm live đang bật: gõ là có kết quả, không cần bấm Tìm.');
+      return;
+    }
+    const modeText = mode === 'exact' ? 'chính xác' : 'tương tự/không dấu';
+    const sourceText = sourceId === 'all' ? 'tất cả nguồn' : 'nguồn đang lọc';
+    setLiveStatus(results.length ? `Đã tìm live: ${results.length} kết quả trong ${sourceText} (${modeText}).` : `Không có kết quả trong ${sourceText} (${modeText}).`, results.length ? 'ready' : 'empty');
+    if (['manual','enter','chip','history'].includes(reason)){ saveHistory(q); renderHistory(); }
+    else { saveHistorySoon(q); }
+  }
+  function scheduleLiveSearch(reason='live'){
+    const q = $('q').value.trim();
+    clearTimeout(liveTimer);
+    searchSeq += 1;
+    if (!q){
+      renderResults([], '', document.querySelector('input[name="mode"]:checked').value);
+      setLiveStatus('Tìm live đang bật: gõ là có kết quả, không cần bấm Tìm.');
+      return;
+    }
+    setLiveStatus('Đang tìm trong dữ liệu Thông tư 14...', 'searching');
+    const seq = searchSeq;
+    liveTimer = setTimeout(() => { if (seq === searchSeq) runSearch(reason); }, 120);
   }
   function openRecord(id, q='', mode=''){
     const d = DATA.find(x => x.id === id); if (!d) return;
@@ -320,16 +362,30 @@
   }
 
   fillFilters(); renderToc(); renderChips(); renderHistory();
-  $('btnSearch').addEventListener('click', runSearch);
-  $('btnClear').addEventListener('click', () => { $('q').value=''; renderResults([], '', 'similar'); $('q').focus(); });
+  $('btnSearch').addEventListener('click', () => runSearch('manual'));
+  $('btnClear').addEventListener('click', () => {
+    $('q').value='';
+    renderResults([], '', document.querySelector('input[name="mode"]:checked').value);
+    setLiveStatus('Đã xóa từ khóa. Tìm live đang chờ bạn nhập nội dung mới.');
+    $('q').focus();
+  });
   $('btnPrev').addEventListener('click', () => move(-1));
   $('btnNext').addEventListener('click', () => move(1));
   $('btnCopy').addEventListener('click', copyCurrent);
   $('btnBookmark').addEventListener('click', toggleBookmark);
   $('btnExport').addEventListener('click', exportResults);
-  $('q').addEventListener('input', () => { clearTimeout(window.__tt14t); window.__tt14t = setTimeout(runSearch, 180); });
-  $('sourceFilter').addEventListener('change', runSearch);
-  document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener('change', runSearch));
+  $('q').addEventListener('input', () => scheduleLiveSearch('live'));
+  $('q').addEventListener('keydown', e => {
+    if (e.key === 'Enter'){
+      e.preventDefault();
+      runSearch('enter');
+      if (lastResults[0]) openRecord(lastResults[0].id, $('q').value.trim(), document.querySelector('input[name="mode"]:checked').value);
+    } else if (e.key === 'Escape'){
+      $('btnClear').click();
+    }
+  });
+  $('sourceFilter').addEventListener('change', () => scheduleLiveSearch('filter'));
+  document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener('change', () => scheduleLiveSearch('mode')));
   window.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); $('q').focus(); }});
   if (location.hash){ openRecord(location.hash.slice(1)); }
   else { openRecord(DATA.find(d => d.title.startsWith('Điều 1.'))?.id || DATA[0].id); }
